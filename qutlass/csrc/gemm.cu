@@ -29,6 +29,8 @@
 #include "cutlass/epilogue/collective/collective_builder.hpp"
 #include "cutlass/gemm/device/gemm_universal_adapter.h"
 #include "cutlass/gemm/kernel/gemm_universal.hpp"
+#include "cutlass/epilogue/thread/activation.h"
+#include "cutlass/epilogue/fusion/operations.hpp"
 #include "cutlass/util/packed_stride.hpp"
 
 #include "cutlass/util/command_line.h"
@@ -97,6 +99,61 @@ struct FpGemm {
         cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
 };
 
+template <typename MmaTileShape, typename ClusterShape, typename PerSmTileShape_MNK,
+          typename ArchTag,
+          typename ElementA, typename LayoutATag, int AlignmentA,
+          typename ElementB, typename LayoutBTag, int AlignmentB>
+struct FpGemmRelu {
+    using ElementD = cutlass::bfloat16_t;
+    using ElementC = cutlass::bfloat16_t;
+    using LayoutCTag = cutlass::layout::RowMajor;
+    using LayoutDTag = cutlass::layout::RowMajor;
+    static constexpr int AlignmentD = 128 / cutlass::sizeof_bits<ElementD>::value;
+    static constexpr int AlignmentC = 128 / cutlass::sizeof_bits<ElementC>::value;
+
+    using ElementAccumulator = float;
+    using ElementCompute = float;
+    using OperatorClass = cutlass::arch::OpClassBlockScaledTensorOp;
+
+    using FusionOp = cutlass::epilogue::fusion::LinCombEltAct<
+        cutlass::epilogue::thread::ReLu,
+        ElementD, ElementCompute, ElementC, ElementCompute>;
+
+    using CollectiveEpilogue =
+        typename cutlass::epilogue::collective::CollectiveBuilder<
+            ArchTag, OperatorClass,
+            PerSmTileShape_MNK, ClusterShape,
+            cutlass::epilogue::collective::EpilogueTileAuto,
+            ElementAccumulator, ElementAccumulator,
+            ElementC, LayoutCTag, AlignmentC,
+            ElementD, LayoutDTag, AlignmentD,
+            cutlass::epilogue::collective::EpilogueScheduleAuto,
+            FusionOp
+            >::CollectiveOp;
+
+    using CollectiveMainloop =
+        typename cutlass::gemm::collective::CollectiveBuilder<
+            ArchTag, OperatorClass,
+            ElementA, LayoutATag, AlignmentA,
+            ElementB, LayoutBTag, AlignmentB,
+            ElementAccumulator,
+            MmaTileShape, ClusterShape,
+            cutlass::gemm::collective::StageCountAutoCarveout<
+                static_cast<int>(
+                    sizeof(typename CollectiveEpilogue::SharedStorage))>,
+            cutlass::gemm::collective::KernelScheduleAuto
+            >::CollectiveOp;
+
+    using GemmKernel =
+        cutlass::gemm::kernel::GemmUniversal<
+            Shape<int, int, int, int>,
+            CollectiveMainloop,
+            CollectiveEpilogue,
+            void>;
+
+    using Gemm =
+        cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
+};
 template <typename Gemm, typename ScaleType>
 typename Gemm::Arguments args_from_options(
                                 at::Tensor& D,
@@ -324,6 +381,84 @@ void matmul_host_nvf4_bf16_tn(torch::Tensor& D,
         using PerSmTileShape_MNK = Shape<_256,_128,_128>;
 
         runGemm<FpGemm<MmaTileShape, ClusterShape, PerSmTileShape_MNK,
+                        ArchTag,
+                        ElementA, LayoutATag, AlignmentA,
+                        ElementB, LayoutBTag, AlignmentB>::Gemm, cutlass::float_ue4m3_t
+                >(D, A, B, A_sf, B_sf, alpha, m, n, k, A.device());
+    }
+#else
+    TORCH_CHECK(false, "Unsupported CUDA arch");
+#endif
+
+}
+
+void matmul_host_nvf4_bf16_tn_relu(torch::Tensor& D,
+                                  torch::Tensor const& A,
+                                  torch::Tensor const& B,
+                                  torch::Tensor const& A_sf,
+                                  torch::Tensor const& B_sf,
+                                  torch::Tensor const& alpha)
+{
+    auto const m = A.sizes()[0];
+    auto const n = B.sizes()[0];
+    auto const k = A.sizes()[1] * 2;
+
+    using ElementA   = cutlass::nv_float4_t<cutlass::float_e2m1_t>;
+    using LayoutATag = cutlass::layout::RowMajor;
+    static constexpr int AlignmentA = 32;
+
+    using ElementB   = cutlass::nv_float4_t<cutlass::float_e2m1_t>;
+    using LayoutBTag = cutlass::layout::ColumnMajor;
+    static constexpr int AlignmentB = 32;
+
+#if TARGET_CUDA_ARCH == 100
+    using ArchTag = cutlass::arch::Sm100;
+    if(m<=16){
+        using MmaTileShape       = Shape<_128,_128,_256>;
+        using ClusterShape       = Shape<_1,_1,_1>;
+        using PerSmTileShape_MNK = Shape<_128,_128,_256>;
+        runGemm<FpGemmRelu<MmaTileShape, ClusterShape, PerSmTileShape_MNK,
+                        ArchTag,
+                        ElementA, LayoutATag, AlignmentA,
+                        ElementB, LayoutBTag, AlignmentB>::Gemm, cutlass::float_ue4m3_t
+                    >(D, A, B, A_sf, B_sf, alpha, m, n, k, A.device());
+    } else if(m<=256){
+        using MmaTileShape       = Shape<_256,_128,_256>;
+        using ClusterShape       = Shape<_2,_1,_1>;
+        using PerSmTileShape_MNK = Shape<_128,_128,_256>;
+        runGemm<FpGemmRelu<MmaTileShape, ClusterShape, PerSmTileShape_MNK,
+                        ArchTag,
+                        ElementA, LayoutATag, AlignmentA,
+                        ElementB, LayoutBTag, AlignmentB>::Gemm, cutlass::float_ue4m3_t
+                    >(D, A, B, A_sf, B_sf, alpha, m, n, k, A.device());
+    } else {
+        using MmaTileShape       = Shape<_256,_256,_256>;
+        using ClusterShape       = Shape<_2,_1,_1>;
+        using PerSmTileShape_MNK = Shape<_128,_256,_256>;
+        runGemm<FpGemmRelu<MmaTileShape, ClusterShape, PerSmTileShape_MNK,
+                        ArchTag,
+                        ElementA, LayoutATag, AlignmentA,
+                        ElementB, LayoutBTag, AlignmentB>::Gemm, cutlass::float_ue4m3_t
+                    >(D, A, B, A_sf, B_sf, alpha, m, n, k, A.device());
+    }
+#elif TARGET_CUDA_ARCH == 120
+    using ArchTag = cutlass::arch::Sm120;
+    using ClusterShape       = Shape<_1,_1,_1>;
+
+    if(m<512){
+        using MmaTileShape       = Shape<_128,_128,_128>;
+        using PerSmTileShape_MNK = Shape<_128,_128,_128>;
+
+        runGemm<FpGemmRelu<MmaTileShape, ClusterShape, PerSmTileShape_MNK,
+                        ArchTag,
+                        ElementA, LayoutATag, AlignmentA,
+                        ElementB, LayoutBTag, AlignmentB>::Gemm, cutlass::float_ue4m3_t
+                >(D, A, B, A_sf, B_sf, alpha, m, n, k, A.device());
+    } else {
+        using MmaTileShape       = Shape<_256,_128,_128>;
+        using PerSmTileShape_MNK = Shape<_256,_128,_128>;
+
+        runGemm<FpGemmRelu<MmaTileShape, ClusterShape, PerSmTileShape_MNK,
                         ArchTag,
                         ElementA, LayoutATag, AlignmentA,
                         ElementB, LayoutBTag, AlignmentB>::Gemm, cutlass::float_ue4m3_t

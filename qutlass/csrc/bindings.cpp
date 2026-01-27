@@ -102,6 +102,40 @@ torch::Tensor matmul_nvf4_bf16_tn(torch::Tensor const& A,
     return OUT;
 }
 
+torch::Tensor matmul_nvf4_bf16_tn_relu(torch::Tensor const& A,
+                                       torch::Tensor const& B,
+                                       torch::Tensor const& A_sf,
+                                       torch::Tensor const& B_sf,
+                                       torch::Tensor const& alpha)
+{
+    torch::checkAllContiguous("matmul_nvf4_bf16_tn_relu", {{A, "A", 0},
+                                                           {B, "B", 1},
+                                                           {A_sf, "A_sf", 2},
+                                                           {B_sf, "B_sf", 3}});
+    torch::checkDeviceType("matmul_nvf4_bf16_tn_relu", {A, B, A_sf, B_sf, alpha}, at::DeviceType::CUDA);
+    torch::checkAllSameGPU("matmul_nvf4_bf16_tn_relu", {{A, "A", 0},
+                                                        {B, "B", 1},
+                                                        {A_sf, "A_sf", 2},
+                                                        {B_sf, "B_sf", 3},
+                                                        {alpha, "alpha", 4}});
+    TORCH_CHECK(A.scalar_type() == at::kByte, "A must be uint8");
+    TORCH_CHECK(B.scalar_type() == at::kByte, "B must be uint8");
+    TORCH_CHECK(A_sf.scalar_type() == at::kFloat8_e4m3fn, "A_sf must be float8_e4m3fn");
+    TORCH_CHECK(B_sf.scalar_type() == at::kFloat8_e4m3fn, "B_sf must be float8_e4m3fn");
+    TORCH_CHECK(A.dim() == 2 && B.dim() == 2, "A and B must be 2D");
+    TORCH_CHECK(A.size(1) == B.size(1), "Inner dimensions must match for A @ B.T");
+    TORCH_CHECK(A.size(1) >= 16, "A K-dim must be >= 16");
+    TORCH_CHECK(B.size(1) >= 16, "B K-dim must be >= 16");
+
+    uint32_t M = A.size(0);
+    uint32_t N = B.size(0);
+    auto OUT   = torch::empty({M, N}, torch::dtype(torch::kBFloat16).device(A.device()));
+
+    matmul_host_nvf4_bf16_tn_relu(OUT, A, B, A_sf, B_sf, alpha);
+
+    return OUT;
+}
+
 torch::Tensor matmul_ada_mxf4_bf16_tn(torch::Tensor const&A,
                                       torch::Tensor const&B,
                                       torch::Tensor const&A_sf,
@@ -497,6 +531,7 @@ void mxfp4_transpose_mxfp8(const torch::Tensor& x_fp4,
 TORCH_LIBRARY(_qutlass_C, m) {
   m.def("matmul_mxf4_bf16_tn(Tensor A, Tensor B, Tensor A_sf, Tensor B_sf, Tensor alpha) -> Tensor");
   m.def("matmul_nvf4_bf16_tn(Tensor A, Tensor B, Tensor A_sf, Tensor B_sf, Tensor alpha) -> Tensor");
+  m.def("matmul_nvf4_bf16_tn_relu(Tensor A, Tensor B, Tensor A_sf, Tensor B_sf, Tensor alpha) -> Tensor");
   m.def("matmul_ada_mxf4_bf16_tn(Tensor A, Tensor B, Tensor A_sf, Tensor B_sf, Tensor alpha) -> Tensor");
 
   m.def("fusedQuantizeMxQuest(Tensor A, Tensor R, Tensor OUT, Tensor OUT_sf) -> (Tensor, Tensor)");
@@ -512,6 +547,7 @@ TORCH_LIBRARY(_qutlass_C, m) {
 TORCH_LIBRARY_IMPL(_qutlass_C, CUDA, m) {
   m.impl("matmul_mxf4_bf16_tn",      TORCH_FN(QUTLASS::matmul_mxf4_bf16_tn));
   m.impl("matmul_nvf4_bf16_tn",      TORCH_FN(QUTLASS::matmul_nvf4_bf16_tn));
+  m.impl("matmul_nvf4_bf16_tn_relu", TORCH_FN(QUTLASS::matmul_nvf4_bf16_tn_relu));
   m.impl("matmul_ada_mxf4_bf16_tn",  TORCH_FN(QUTLASS::matmul_ada_mxf4_bf16_tn));
 
   m.impl("fusedQuantizeMxQuest",     TORCH_FN(QUTLASS::fusedQuantizeMxQuest));
@@ -535,6 +571,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m
     m.def("matmul_mxf4_bf16_tn",     &matmul_mxf4_bf16_tn,     "matmul_mxf4_bf16_tn");
     m.def("matmul_ada_mxf4_bf16_tn", &matmul_ada_mxf4_bf16_tn, "matmul_ada_mxf4_bf16_tn");
     m.def("matmul_nvf4_bf16_tn",     &matmul_nvf4_bf16_tn,     "matmul_nvf4_bf16_tn");
+    m.def("matmul_nvf4_bf16_tn_relu", &matmul_nvf4_bf16_tn_relu, "matmul_nvf4_bf16_tn_relu");
     m.def("matmul_mxf8_bf16_tn",     &matmul_mxf8_bf16_tn,     "matmul_mxf8_bf16_tn");
     m.def("matmul_mxf8_bf16_nn",     &matmul_mxf8_bf16_nn,     "matmul_mxf8_bf16_nn");
 
