@@ -126,6 +126,7 @@ if __name__ == "__main__":
                     "qutlass/csrc/fused_quantize_mx_sm100.cu",
                     "qutlass/csrc/fused_quantize_nv_sm100.cu",
                     "qutlass/csrc/quartet_bwd_sm120.cu",
+                    "qutlass/csrc/optimizer.cu",
                 ],
                 include_dirs=[
                     os.path.join(setup_dir, "qutlass/csrc/include"),

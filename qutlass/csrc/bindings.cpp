@@ -31,6 +31,7 @@
 #include "include/gemm.h"
 #include "include/fused_quantize_host.h"
 #include "include/backward_host.h"
+#include "include/optimizer_host.h"
 
 namespace QUTLASS {
 
@@ -585,6 +586,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m
     m.def("backward_qt_bf16", &backward_qt_bf16, "backward_qt_bf16");
     m.def("backward_bf16_square_double_mxfp8", &backward_bf16_square_double_mxfp8, "backward_bf16_square_double_mxfp8");
     m.def("mxfp4_transpose_mxfp8", &mxfp4_transpose_mxfp8, "mxfp4_transpose_mxfp8");
+    m.def("fused_adamw_fp4_update", &fused_adamw_fp4_update_host, "fused_adamw_fp4_update");
 }
 #endif
 }
